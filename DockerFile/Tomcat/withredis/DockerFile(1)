@@ -1,0 +1,86 @@
+# Stage 1: Build stage
+FROM alpine:3.14 AS build
+
+# TOMCAT VERSION, HOME DIRECTORY 환경변수 설정
+ENV JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
+ENV TOMCAT_VERSION=9.0.93
+ENV CATALINA_HOME=/usr/local/tomcat
+
+# 필요한 Package 설치
+RUN apk update && \
+    apk add --no-cache wget tar openjdk8-jre && \
+    rm -rf /var/cache/apk/*
+
+# TOMCAT tmp directory에 설치
+RUN mkdir $CATALINA_HOME
+RUN wget https://archive.apache.org/dist/tomcat/tomcat-9/v9.0.93/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz -O /tmp/tomcat.tar.gz
+# Tomcat directory는 /usr/local/tomcat로 옮기고, 
+# mariadb J connector 설치하여 /usr/local/tomcat/lib directory로 옮겼습니다.
+RUN cd /tmp && tar xvfz tomcat.tar.gz \
+        && cp -Rv /tmp/apache-tomcat-${TOMCAT_VERSION}/* $CATALINA_HOME \
+        && rm -rf /tmp/apache-tomcat-${TOMCAT_VERSION} \
+        && rm -rf /tmp/tomcat.tar.gz \
+        && wget https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar -P $CATALINA_HOME/lib \
+    # tomcat 도커 이미지 빌드 중 ClassNotFoundException 발생  →  slf4j-simple과 slf4j-api jar 파일 설치하여 성공
+        && wget https://repo1.maven.org/maven2/org/slf4j/slf4j-simple/2.0.16/slf4j-simple-2.0.16.jar \
+        && mv slf4j-simple-2.0.16.jar $CATALINA_HOME/lib \
+        && wget https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar \
+        && mv slf4j-api-2.0.16.jar $CATALINA_HOME/lib
+# 불필요한 파일 삭제
+RUN rm -rf $CATALINA_HOME/webapps/* \
+    && rm -rf $CATALINA_HOME/bin/*.bat \
+    && rm -rf $CATALINA_HOME/bin/*.tar.gz \
+    && rm -rf $CATALINA_HOME/bin/*.md5 \
+    && rm -rf $CATALINA_HOME/bin/*.sha512
+
+    
+RUN mkdir $CATALINA_HOME/webapps/ROOT
+
+# AWS Elasticache에서 생성했던 Redis OSS cache endpoint 정보 저장
+COPY redis-data-cache.properties $CATALINA_HOME/conf
+# mariaDB 정보와 세션 요청을 처리하는 tomcat.request.session.redis.SessionHandlerValve, 
+# 세션 데이터를 Redis에 저장하고, Redis에서 세션 데이터를 읽어오는 역할을 하는 
+# tomcat.request.session.redis.SessionManager 정의
+COPY context.xml $CATALINA_HOME/conf
+COPY web.xml $CATALINA_HOME/conf
+COPY trd-index/ $CATALINA_HOME/webapps/ROOT
+
+# Redis 설치
+RUN wget https://github.com/ran-jit/tomcat-cluster-redis-session-manager/releases/download/2.0.4/tomcat-cluster-redis-session-manager.zip && \
+unzip tomcat-cluster-redis-session-manager.zip -d $CATALINA_HOME && \
+mv $CATALINA_HOME/tomcat-cluster-redis-session-manager/lib/* $CATALINA_HOME/lib && \
+mv $CATALINA_HOME/tomcat-cluster-redis-session-manager/conf/* $CATALINA_HOmE/conf && \
+# Jedis Driver 설치
+wget https://repo1.maven.org/maven2/redis/clients/jedis/3.7.1/jedis-3.7.1.jar && \
+cp jedis-3.7.1.jar $JAVA_HOME/lib/ && \
+mv jedis-3.7.1.jar $CATALINA_HOME/lib/
+
+# /opt/tomcat/bin/catalina.sh 파일에 실행 권한 추가
+RUN chmod +x $CATALINA_HOME/bin/catalina.sh
+
+# Stage 2 : 
+FROM alpine:3.14
+
+# TOMCAT 실행을 위한 JDK 설치
+RUN apk add --no-cache openjdk8-jre-base && \
+    rm -rf /var/cache/apk/*
+
+# TOMCAT HOME DIRECTORY , 시간설정 환경변수 설정
+ENV JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
+ENV CATALINA_HOME=/usr/local/tomcat
+RUN apk add --no-cache tzdata
+ENV TZ=Asia/Seoul
+
+#  Java 프로그램이 실행될 때 클래스 파일을 찾는 경로를 지정
+ENV CLASSPATH .:$JAVA_HOME/jre/lib/ext:$JAVA_HOME/lib/tools.jar:$CATALINA_HOME/lib/\
+jsp-api.jar:$CATALINA_HOME/lib/servlet-api.jar:$CATALINA_HOME/lib/mariadb-java-client-3.4.1.jar:\
+$CATALINA_HOME/lib/jedis-3.7.1.jar:$CATALINA_HOME/lib/tomcat-cluster-redis-session-manager-2.0.4.jar
+
+# Stage 1 에서 설치한 TOMCAT 및 메인페이지 복사
+COPY --from=build $CATALINA_HOME $CATALINA_HOME
+
+# 포트번호 노출
+EXPOSE 8080
+
+# TOMCAT 실행
+CMD ["/usr/local/tomcat/bin/catalina.sh", "run"]
